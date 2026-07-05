@@ -136,6 +136,10 @@ namespace dxvk {
                 D3D9DeviceDirtyFlag::ViewportScissor,
                 D3D9DeviceDirtyFlag::MultiSampleState,
                 D3D9DeviceDirtyFlag::Fog,
+                D3D9DeviceDirtyFlag::FogColor,
+                D3D9DeviceDirtyFlag::FogDensity,
+                D3D9DeviceDirtyFlag::FogScale,
+                D3D9DeviceDirtyFlag::FogEnd,
                 D3D9DeviceDirtyFlag::FFVertexData,
                 D3D9DeviceDirtyFlag::FFVertexBlend,
                 D3D9DeviceDirtyFlag::FFPixelShader,
@@ -2472,11 +2476,24 @@ namespace dxvk {
         case D3DRS_FOGENABLE:
         case D3DRS_FOGVERTEXMODE:
         case D3DRS_FOGTABLEMODE:
-        case D3DRS_FOGCOLOR:
-        case D3DRS_FOGSTART:
-        case D3DRS_FOGEND:
-        case D3DRS_FOGDENSITY:
           m_dirty.set(D3D9DeviceDirtyFlag::Fog);
+          break;
+
+        case D3DRS_FOGCOLOR:
+          m_dirty.set(D3D9DeviceDirtyFlag::FogColor);
+          break;
+
+        case D3DRS_FOGSTART:
+          m_dirty.set(D3D9DeviceDirtyFlag::FogScale);
+          break;
+
+        case D3DRS_FOGEND:
+          m_dirty.set(D3D9DeviceDirtyFlag::FogScale,
+                      D3D9DeviceDirtyFlag::FogEnd);
+          break;
+
+        case D3DRS_FOGDENSITY:
+          m_dirty.set(D3D9DeviceDirtyFlag::FogDensity);
           break;
 
         case D3DRS_RANGEFOGENABLE:
@@ -6593,8 +6610,6 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::UpdateFog() {
-    m_dirty.clr(D3D9DeviceDirtyFlag::Fog);
-
     auto& rs = m_state.renderStates;
 
     bool fogEnabled = bool(rs[D3DRS_FOGENABLE]);
@@ -6613,27 +6628,55 @@ namespace dxvk {
       }
     }
 
-    // Only set up vertex frog if pixel fog is not used
-    if (m_specData.setFogMode(fogEnabled, fogUseZ,
-        D3DFOGMODE(rs[D3DRS_FOGVERTEXMODE]),
-        D3DFOGMODE(rs[D3DRS_FOGTABLEMODE])))
-      m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
+    D3DFOGMODE psFog = fogEnabled ? D3DFOGMODE(rs[D3DRS_FOGTABLEMODE]) : D3DFOG_NONE;
+    D3DFOGMODE vsFog = (fogEnabled && psFog == D3DFOG_NONE)
+      ? D3DFOGMODE(rs[D3DRS_FOGVERTEXMODE])
+      : D3DFOG_NONE;
+
+    if (m_dirty.test(D3D9DeviceDirtyFlag::Fog)) {
+      m_dirty.clr(D3D9DeviceDirtyFlag::Fog);
+
+      if (m_specData.setFogMode(fogEnabled, fogUseZ, vsFog, psFog))
+        m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
+    }
+
+    D3DFOGMODE activeFog = psFog != D3DFOG_NONE ? psFog : vsFog;
 
     if (fogEnabled) {
-      // Update fog parameters.
-      uint32_t fogColor = rs[D3DRS_FOGCOLOR];
-      float fogDensity = bit::cast<float>(rs[D3DRS_FOGDENSITY]);
-      float fogEnd   = bit::cast<float>(rs[D3DRS_FOGEND]);
-      float fogStart = bit::cast<float>(rs[D3DRS_FOGSTART]);
+      if (m_dirty.test(D3D9DeviceDirtyFlag::FogColor)) {
+        m_dirty.clr(D3D9DeviceDirtyFlag::FogColor);
 
-      m_pushData.shared.fogColor[0] = uint8_t(fogColor >>  0u);
-      m_pushData.shared.fogColor[1] = uint8_t(fogColor >>  8u);
-      m_pushData.shared.fogColor[2] = uint8_t(fogColor >> 16u);
-      m_pushData.shared.fogDensity = fogDensity;
-      m_pushData.shared.fogDistanceEnd = fogEnd;
-      m_pushData.shared.fogDistanceScale = (fogEnd != fogStart) ? 1.0f / (fogEnd - fogStart) : 0.0f;
+        uint32_t fogColor = rs[D3DRS_FOGCOLOR];
+        m_pushData.shared.fogColor[0] = uint8_t(fogColor >>  0u);
+        m_pushData.shared.fogColor[1] = uint8_t(fogColor >>  8u);
+        m_pushData.shared.fogColor[2] = uint8_t(fogColor >> 16u);
+        m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared);
+      }
 
-      m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared);
+      if (activeFog == D3DFOG_LINEAR) {
+        if (m_dirty.test(D3D9DeviceDirtyFlag::FogScale)) {
+          m_dirty.clr(D3D9DeviceDirtyFlag::FogScale);
+
+          float fogEnd   = bit::cast<float>(rs[D3DRS_FOGEND]);
+          float fogStart = bit::cast<float>(rs[D3DRS_FOGSTART]);
+          m_pushData.shared.fogDistanceScale = (fogEnd != fogStart) ? 1.0f / (fogEnd - fogStart) : 0.0f;
+          m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared);
+        }
+
+        if (m_dirty.test(D3D9DeviceDirtyFlag::FogEnd)) {
+          m_dirty.clr(D3D9DeviceDirtyFlag::FogEnd);
+
+          m_pushData.shared.fogDistanceEnd = bit::cast<float>(rs[D3DRS_FOGEND]);
+          m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared);
+        }
+      } else if (activeFog == D3DFOG_EXP || activeFog == D3DFOG_EXP2) {
+        if (m_dirty.test(D3D9DeviceDirtyFlag::FogDensity)) {
+          m_dirty.clr(D3D9DeviceDirtyFlag::FogDensity);
+
+          m_pushData.shared.fogDensity = bit::cast<float>(rs[D3DRS_FOGDENSITY]);
+          m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared);
+        }
+      }
     }
   }
 
@@ -7382,7 +7425,12 @@ namespace dxvk {
     if (unlikely(UploadIBO && ibo != nullptr && ibo->NeedsUpload()))
       FlushBuffer(ibo);
 
-    UpdateFog();
+    if (unlikely(m_dirty.any(D3D9DeviceDirtyFlag::Fog,
+                             D3D9DeviceDirtyFlag::FogColor,
+                             D3D9DeviceDirtyFlag::FogDensity,
+                             D3D9DeviceDirtyFlag::FogScale,
+                             D3D9DeviceDirtyFlag::FogEnd)))
+      UpdateFog();
 
     if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::Framebuffer)))
       BindFramebuffer();
@@ -8700,7 +8748,11 @@ namespace dxvk {
     rs[D3DRS_FOGEND]                     = bit::cast<DWORD>(1.0f);
     rs[D3DRS_FOGDENSITY]                 = bit::cast<DWORD>(1.0f);
     rs[D3DRS_FOGVERTEXMODE]              = D3DFOG_NONE;
-    m_dirty.set(D3D9DeviceDirtyFlag::Fog);
+    m_dirty.set(D3D9DeviceDirtyFlag::Fog,
+                D3D9DeviceDirtyFlag::FogColor,
+                D3D9DeviceDirtyFlag::FogDensity,
+                D3D9DeviceDirtyFlag::FogEnd,
+                D3D9DeviceDirtyFlag::FogScale);
 
     rs[D3DRS_CLIPPLANEENABLE] = 0;
     m_dirty.set(D3D9DeviceDirtyFlag::ClipPlanes);
