@@ -6152,7 +6152,7 @@ namespace dxvk {
       float end = bit::cast<float>(rs[D3DRS_FOGEND]);
       float start = bit::cast<float>(rs[D3DRS_FOGSTART]);
 
-      float scale = 1.0f / (end - start);
+      float scale = (end != start) ? 1.0f / (end - start) : 0.0f;
       UpdatePushConstant<offsetof(D3D9RenderStateInfo, fogScale), sizeof(float)>(&scale);
     }
     else if constexpr (Item == D3D9RenderStateItem::PointSize) {
