@@ -7382,8 +7382,7 @@ namespace dxvk {
     if (unlikely(UploadIBO && ibo != nullptr && ibo->NeedsUpload()))
       FlushBuffer(ibo);
 
-    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::Fog)))
-      UpdateFog();
+    UpdateFog();
 
     if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::Framebuffer)))
       BindFramebuffer();
